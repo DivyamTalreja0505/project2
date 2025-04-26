@@ -1,49 +1,105 @@
-# llm_rag_testing.py
 
 import os
+import base64
+import uuid
 from dotenv import load_dotenv, find_dotenv
+import pytesseract
+
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_chroma import Chroma
 from langchain.schema.document import Document
 from langchain.storage import InMemoryStore
 from langchain.retrievers.multi_vector import MultiVectorRetriever
-import uuid
+from langchain.schema.messages import HumanMessage, AIMessage
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema.runnable import RunnablePassthrough
+from langchain.schema.output_parser import StrOutputParser
+from unstructured.partition.pdf import partition_pdf
 
-# Load OpenAI API key
+# Step 1: Load environment variables
 _ = load_dotenv(find_dotenv())
-openai_api_key = os.environ["OPENAI_API_KEY"]
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
-# Initialize models
+# Step 2: Initialize LLM models
 chain_gpt_35 = ChatOpenAI(model="gpt-3.5-turbo", max_tokens=1024)
 chain_gpt_4o = ChatOpenAI(model="gpt-4o", max_tokens=1024)
 
-# Example texts
-texts = [
-    "Artificial Intelligence is transforming industries through automation and data insights.",
-    "Retrieval-Augmented Generation combines document retrieval and language modeling for improved question answering."
-]
+# Step 3: Set Tesseract OCR path (important for image extraction)
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-# Summarization function
-def summarize_text(model, text):
+# Step 4: Setup input and output directories
+input_path = os.getcwd()
+output_path = os.path.join(os.getcwd(), "figures")
+
+os.makedirs(output_path, exist_ok=True)
+
+# Step 5: Parse PDF to extract text, tables, images
+raw_pdf_elements = partition_pdf(
+    filename=os.path.join(input_path, "your_pdf_file.pdf"),  # Change filename here
+    extract_images_in_pdf=True,
+    infer_table_structure=True,
+    chunking_strategy="by_title",
+    max_characters=4000,
+    new_after_n_chars=3800,
+    combine_text_under_n_chars=2000,
+    image_output_dir_path=output_path,
+)
+
+# Step 6: Separate elements into text, tables, images
+text_elements = []
+table_elements = []
+image_elements = []
+
+for element in raw_pdf_elements:
+    if 'CompositeElement' in str(type(element)):
+        text_elements.append(element.text)
+    elif 'Table' in str(type(element)):
+        table_elements.append(element.text)
+
+# Encode extracted images
+def encode_image(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+
+for image_file in os.listdir(output_path):
+    if image_file.endswith(('.png', '.jpg', '.jpeg')):
+        image_path = os.path.join(output_path, image_file)
+        image_elements.append(encode_image(image_path))
+
+# Step 7: Define summarization functions
+def summarize_text(text):
     prompt = f"Summarize the following text:\n\n{text}\n\nSummary:"
-    response = model.invoke([{"role": "user", "content": prompt}])
+    response = chain_gpt_35.invoke([HumanMessage(content=prompt)])
     return response.content
 
-# Summarize texts using both models
-summaries_gpt_35 = []
-summaries_gpt_4o = []
+def summarize_table(table):
+    prompt = f"Summarize the following table:\n\n{table}\n\nSummary:"
+    response = chain_gpt_35.invoke([HumanMessage(content=prompt)])
+    return response.content
 
-for text in texts:
-    summaries_gpt_35.append(summarize_text(chain_gpt_35, text))
-    summaries_gpt_4o.append(summarize_text(chain_gpt_4o, text))
+def summarize_image(encoded_image):
+    prompt = [
+        AIMessage(content="You are a bot that is good at analyzing images."),
+        HumanMessage(content=[
+            {"type": "text", "text": "Describe the contents of this image."},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"}}
+        ])
+    ]
+    response = chain_gpt_4o.invoke(prompt)
+    return response.content
 
-# Initialize database and retriever
-vectorstore = Chroma(collection_name="llm_rag_project", embedding_function=OpenAIEmbeddings())
+# Step 8: Summarize all extracted elements
+text_summaries = [summarize_text(te) for te in text_elements]
+table_summaries = [summarize_table(te) for te in table_elements]
+image_summaries = [summarize_image(ie) for ie in image_elements]
+
+# Step 9: Initialize Chroma Vector Database and Docstore
+vectorstore = Chroma(collection_name="multimodal_rag_project", embedding_function=OpenAIEmbeddings())
 docstore = InMemoryStore()
 id_key = "doc_id"
 retriever = MultiVectorRetriever(vectorstore=vectorstore, docstore=docstore, id_key=id_key)
 
-# Add documents to retriever
+# Step 10: Add summarized documents to the retriever
 def add_documents_to_retriever(summaries, originals, label):
     doc_ids = [str(uuid.uuid4()) for _ in summaries]
     summary_docs = [
@@ -53,12 +109,31 @@ def add_documents_to_retriever(summaries, originals, label):
     retriever.vectorstore.add_documents(summary_docs)
     retriever.docstore.mset(list(zip(doc_ids, originals)))
 
-add_documents_to_retriever(summaries_gpt_35, texts, "gpt-3.5-turbo")
-add_documents_to_retriever(summaries_gpt_4o, texts, "gpt-4o")
+add_documents_to_retriever(text_summaries, text_elements, "text")
+add_documents_to_retriever(table_summaries, table_elements, "table")
+add_documents_to_retriever(image_summaries, image_summaries, "image")
 
-# Test retrieval
-print("\nRetrieving documents related to RAG...\n")
-retrieved_docs = retriever.invoke("Explain RAG in simple terms.")
+# Step 11: Setup final QA Chain
+prompt_template = """Answer the question based only on the following context, which can include text, images, and tables:
+{context}
+Question: {question}
+"""
+prompt = ChatPromptTemplate.from_template(prompt_template)
+qa_model = ChatOpenAI(temperature=0, model="gpt-3.5-turbo")
 
-for idx, doc in enumerate(retrieved_docs):
-    print(f"Document {idx+1}: {doc}\n")
+qa_chain = (
+    {"context": retriever, "question": RunnablePassthrough()}
+    | prompt
+    | qa_model
+    | StrOutputParser()
+)
+
+# Step 12: Example Queries
+print("\nExample Query 1: What products are displayed in the images?")
+print(qa_chain.invoke("What products are displayed in the images?"))
+
+print("\nExample Query 2: What is the financial summary of the company?")
+print(qa_chain.invoke("What is the financial summary of the company?"))
+
+print("\nExample Query 3: What is the total revenue mentioned?")
+print(qa_chain.invoke("What is the total revenue mentioned?"))
