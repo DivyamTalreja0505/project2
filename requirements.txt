@@ -1,4 +1,6 @@
-python-dotenv
-langchain
-langchain-openai
-langchain-chroma
+pip install langchain
+pip install langchain-openai
+pip install langchain-chroma
+pip install python-dotenv
+pip install unstructured[all-docs]
+pip install pytesseract
