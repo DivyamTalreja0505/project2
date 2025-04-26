@@ -21,7 +21,7 @@ Technologies Used:
 - dotenv
 
 Installation:
-git clone https://github.com/yourusername/multimodal-rag-system.git
+git clone https://github.com/DivyamTalreja0505/project2/
 cd multimodal-rag-system
 python -m venv env
 source env/bin/activate  # On Windows: env\Scripts\activate
