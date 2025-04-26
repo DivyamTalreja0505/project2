@@ -22,7 +22,7 @@ Technologies Used:
 
 Installation:
 git clone https://github.com/DivyamTalreja0505/project2/
-cd multimodal-rag-system
+cd llm_rag_testing
 python -m venv env
 source env/bin/activate  # On Windows: env\Scripts\activate
 pip install -r requirements.txt
